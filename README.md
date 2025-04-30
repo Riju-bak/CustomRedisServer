@@ -7,7 +7,7 @@ NOTE: This is just for learning purpose and might not be suitable to use directl
 
 The server has the following capabilities - 
 
-- Threadpool to handle upto 50 redis-client requests concurrently
+- Thread-pool to handle upto 50 redis-client requests concurrently
 - In-memory key value store with data persistence support
 - Single master replication for redundancy
 - Redis-style transactions for atomic operations
@@ -15,8 +15,8 @@ The server has the following capabilities -
 ## Usage
 
 ```
-
-
+git clone https://github.com/Riju-bak/CustomRedisServer.git
+./CustomRedis/run.sh
 ```
 
 
