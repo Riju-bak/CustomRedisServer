@@ -18,136 +18,191 @@ public class CommandRunner
     
     public async Task RunCommandAsync(List<object>? tokenizedCommand)
     {
-        if (tokenizedCommand != null)
-            for (int i = 0; i < tokenizedCommand.Count; i++)
+        string command = (tokenizedCommand![0] as string)!;
+        if (command.Equals("EXEC", StringComparison.OrdinalIgnoreCase))
+        {
+            await Exec();
+        }
+        else if(command.Equals("DISCARD", StringComparison.OrdinalIgnoreCase))
+        {
+            await Discard();
+        }
+        if (!command.Equals("EXEC", StringComparison.OrdinalIgnoreCase) &&
+            Server.TransactionQueue.ContainsKey(_clientSocket.Handle))
+        {
+            //This means MULTI has been called, and subsequent commands must be queued
+            Server.TransactionQueue[_clientSocket.Handle].Enqueue(tokenizedCommand);
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("+QUEUED\r\n"));
+        }
+        else if (command.Equals("PING", StringComparison.OrdinalIgnoreCase))
+        {
+            // TCP is a byte stream protocol. To send string we convert it to byte arrays.
+            // Essentially we send a stream of bytes
+            //  that TCP divides into packets.
+            byte[] response = Encoding.UTF8.GetBytes("+PONG\r\n");
+            await _clientSocket.SendAsync(response);
+        }
+        else if (command.Equals("ECHO", StringComparison.OrdinalIgnoreCase))
+        {
+            string? msg = tokenizedCommand[1] as string;
+            await Echo(msg);
+        }
+        else if(command.Equals("SET", StringComparison.OrdinalIgnoreCase))
+        {
+            string? key = (tokenizedCommand[1] as string)!;
+            string? value = (tokenizedCommand[2] as string)!;
+            string? expiresInMillis = null;
+            // if (tokenizedCommand.Contains("PX")) expiresInMillis = (tokenizedCommand[4] as string)!;
+            if (3 < tokenizedCommand.Count && (tokenizedCommand[3] as string)!.Equals("PX", StringComparison.OrdinalIgnoreCase))
             {
-                string? command = tokenizedCommand[i] as string;
-                if (command != null)
-                {
-                    if (command.Equals("PING", StringComparison.OrdinalIgnoreCase))
-                    {
-                        // TCP is a byte stream protocol. To send string we convert it to byte arrays.
-                        // Essentially we send a stream of bytes
-                        //  that TCP divides into packets.
-                        byte[] response = Encoding.UTF8.GetBytes("+PONG\r\n");
-                        await _clientSocket.SendAsync(response);
-                    }
-                    else if (command.Equals("ECHO", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (i+1 > tokenizedCommand.Count)
-                        {
-                            //echo is not followed by any text
-                            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("+(error) ERR wrong number of arguments for 'echo' command\r\n"));
-                            return;
-                        }
-                        string? msg = tokenizedCommand[i + 1] as string;
-                        await Echo(msg);
-                    }
-                    else if(command.Equals("SET", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (i+3 < tokenizedCommand.Count 
-                            && ((tokenizedCommand[i+3] as string)!).Equals("PX", StringComparison.OrdinalIgnoreCase)
-                            && i+4 < tokenizedCommand.Count)
-                        {
-                            await Set(key: tokenizedCommand[i+1] as string, value: tokenizedCommand[i+2] as string, expiresInMillis: tokenizedCommand[i+4] as string);
-                            await Propagate.Set(key: (tokenizedCommand[i+1] as string)!, value: (tokenizedCommand[i+2] as string)!, expiresInMillis: tokenizedCommand[i+4] as string);
-                        }
-                        else
-                        {
-                            await Set(key: tokenizedCommand[i + 1] as string,  value: tokenizedCommand[i+2] as string);
-                            await Propagate.Set(key: (tokenizedCommand[i + 1] as string)!,  value: (tokenizedCommand[i+2] as string)!);
-                        }
-                    }
-                    else if (command.Equals("GET", StringComparison.OrdinalIgnoreCase))
-                    {
-                        await Get(key: tokenizedCommand[i + 1] as string);
-                    }
-                    else if (command.Equals("CONFIG", StringComparison.OrdinalIgnoreCase))
-                    {
-                        i++;
-                        string? configCommand = tokenizedCommand[i] as string;
-                        if (configCommand!.Equals("SET", StringComparison.OrdinalIgnoreCase))
-                        {
-                            i++;
-                            List<Tuple<string, string>> paramsAndValues = new();
-                            while (i < tokenizedCommand.Count)
-                            {
-                                var param = tokenizedCommand[i] as string;
-                                i++;
-                                var value = tokenizedCommand[i] as string;
-                                i++;
-                                paramsAndValues.Add(new Tuple<string, string>(param!, value!));
-                            }
-                            await ConfigSet(paramsAndValues);
-                        }
-                        else if (configCommand.Equals("GET", StringComparison.OrdinalIgnoreCase))
-                        {
-                            i++;
-                            List<string> parameters = new();
-                            while (i < tokenizedCommand.Count)
-                            {
-                                var param = tokenizedCommand[i] as string;
-                                parameters.Add(param!);
-                                i++;
-                            }
-                            await ConfigGet(parameters);
-                        }
-                    }
-                    else if (command.Equals("INFO", StringComparison.OrdinalIgnoreCase))
-                    {
-                        i++;
-                        string? section = tokenizedCommand[i] as string;
-                        if(section != null)
-                            await DisplayInfo(section);
-                        else
-                            await DisplayInfo();
-                    }
-                    else if(command.Equals("REPLCONF", StringComparison.OrdinalIgnoreCase))
-                    {
-                        if ((tokenizedCommand[i + 1] as string)!.Equals("ACK", StringComparison.OrdinalIgnoreCase))
-                        {
-                            //REPLCONF ACK <offset> req will come only from a replica. So we know the _clientSocket reprsents a replica conn.
-                            int replSlaveOffset = int.Parse((tokenizedCommand[i + 2] as string)!);
-                            
-                            _replOffsetMutex.WaitOne();
-                            Console.WriteLine($"Updating replica's offset to {replSlaveOffset}");
-                            Replica repl = Server.Replicas[_clientSocket.Handle];
-                            repl.Offset = replSlaveOffset;
-                            repl.SentAnAckToMaster = true;
-                            repl.MasterPropagatedWriteCmdToMe = true;
-                            _replOffsetMutex.ReleaseMutex();
-                        }
-                        await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("+OK\r\n"));
-                    }
-                    else if (command.Equals("PSYNC", StringComparison.OrdinalIgnoreCase))
-                    {
-                        /*NOTE: Below are the replId and replOffset that the replica wants to sync with.
-                            It may not be the actual replId of the master */ 
-                        string reqReplId = (tokenizedCommand[i+1] as string)!;  
-                        string reqReplOffset = (tokenizedCommand[i+2] as string)!;
-
-                        await Psync(reqReplId, reqReplOffset);
-                    }
-                    else if(command.Equals("KEYS", StringComparison.OrdinalIgnoreCase))
-                    {
-                        string pattern = (tokenizedCommand[i + 1] as string)!;
-                        await Keys(pattern);
-                    }
-                    else if(command.Equals("WAIT", StringComparison.OrdinalIgnoreCase))
-                    {
-                        await Wait(minReqReplicasAckStr:
-                            (tokenizedCommand[i + 1] as string), timeoutStr: (tokenizedCommand[i + 2] as string));
-                    }
-                    
-                }
-                // WARNING: Somehow uncommenting this causes the codecrafters tests to fail - MUST INVESTIGATE
-                // else
-                // {
-                //     string errMsg = $"(error) ERR unknown command '{command}'";
-                //     string respErrMsg = $"${errMsg.Length}\r\n{errMsg}\r\n";
-                //     clientSocket.Send(Encoding.UTF8.GetBytes(respErrMsg)); 
-                // }
+                expiresInMillis = tokenizedCommand[4] as string;
             }
+            KeyValueStore.Set(key, value, expiresInMillis);
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("+OK\r\n"));
+            await Propagate.Set(key, value, expiresInMillis);
+        }
+        else if (command.Equals("GET", StringComparison.OrdinalIgnoreCase))
+        {
+            await Get(key: tokenizedCommand[1] as string);
+        }
+        else if (command.Equals("CONFIG", StringComparison.OrdinalIgnoreCase))
+        {
+            string? configCommand = tokenizedCommand[1] as string;
+            if (configCommand!.Equals("SET", StringComparison.OrdinalIgnoreCase))
+            {
+                List<Tuple<string, string>> paramsAndValues = new();
+                for (int i=1; i < tokenizedCommand.Count; )
+                {
+                    var param = tokenizedCommand[i++] as string;
+                    var value = tokenizedCommand[i++] as string;
+                    paramsAndValues.Add(new Tuple<string, string>(param!, value!));
+                }
+                await ConfigSet(paramsAndValues);
+            }
+            else if (configCommand.Equals("GET", StringComparison.OrdinalIgnoreCase))
+            {
+                List<string> parameters = new();
+                for (int i=2; i < tokenizedCommand.Count; i++)
+                {
+                    var param = tokenizedCommand[i] as string;
+                    parameters.Add(param!);
+                }
+                await ConfigGet(parameters);
+            }
+        }
+        else if (command.Equals("INFO", StringComparison.OrdinalIgnoreCase))
+        {
+            string? section = tokenizedCommand[1] as string;
+            if(section != null)
+                await DisplayInfo(section);
+            else
+                await DisplayInfo();
+        }
+        else if(command.Equals("REPLCONF", StringComparison.OrdinalIgnoreCase))
+        {
+            if ((tokenizedCommand[1] as string)!.Equals("ACK", StringComparison.OrdinalIgnoreCase))
+            {
+                //REPLCONF ACK <offset> req will come only from a replica. So we know the _clientSocket reprsents a replica conn.
+                int replSlaveOffset = int.Parse((tokenizedCommand[2] as string)!);
+                            
+                _replOffsetMutex.WaitOne();
+                Console.WriteLine($"Updating replica's offset to {replSlaveOffset}");
+                Replica repl = Server.Replicas[_clientSocket.Handle];
+                repl.Offset = replSlaveOffset;
+                repl.SentAnAckToMaster = true;
+                repl.MasterPropagatedWriteCmdToMe = true;
+                _replOffsetMutex.ReleaseMutex();
+            }
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("+OK\r\n"));
+        }
+        else if (command.Equals("PSYNC", StringComparison.OrdinalIgnoreCase))
+        {
+            /*NOTE: Below are the replId and replOffset that the replica wants to sync with.
+                It may not be the actual replId of the master */ 
+            string reqReplId = (tokenizedCommand[1] as string)!;  
+            string reqReplOffset = (tokenizedCommand[2] as string)!;
+
+            await Psync(reqReplId, reqReplOffset);
+        }
+        else if(command.Equals("KEYS", StringComparison.OrdinalIgnoreCase))
+        {
+            string pattern = (tokenizedCommand[1] as string)!;
+            await Keys(pattern);
+        }
+        else if(command.Equals("WAIT", StringComparison.OrdinalIgnoreCase))
+        {
+            await Wait(minReqReplicasAckStr:
+                (tokenizedCommand[1] as string), timeoutStr: (tokenizedCommand[2] as string));
+        }
+        else if(command.Equals("INCR", StringComparison.OrdinalIgnoreCase))
+        {
+            await Incr(key: (tokenizedCommand[1] as string)!);
+        }
+        else if (command.Equals("MULTI", StringComparison.OrdinalIgnoreCase))
+        {
+            await Multi();
+        }
+        else if (command.Equals("COMMAND", StringComparison.OrdinalIgnoreCase) &&
+                 ((tokenizedCommand[1] as string)!).Equals("DOCS"))
+        {
+            //This is to support interactive mode
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("*0\r\n"));
+        }
+                    
+        // WARNING: Somehow uncommenting this causes the codecrafters tests to fail - MUST INVESTIGATE
+        // else
+        // {
+        //     string errMsg = $"(error) ERR unknown command '{command}'";
+        //     string respErrMsg = $"${errMsg.Length}\r\n{errMsg}\r\n";
+        //     clientSocket.Send(Encoding.UTF8.GetBytes(respErrMsg)); 
+        // }
+    }
+
+    private async Task Discard()
+    {
+        if (!Server.TransactionQueue.TryGetValue(_clientSocket.Handle, out var q))
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("-ERR DISCARD without MULTI\r\n"));
+        else
+        {
+            Server.TransactionQueue.Remove(_clientSocket.Handle, out _);
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("+OK\r\n"));
+        }
+    }
+
+    private async Task Exec()
+    {
+        Server.TransactionMre.Reset();      //Block all client requests while a transaction is being executed
+        if (!Server.TransactionQueue.TryGetValue(_clientSocket.Handle, out var q))
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("-ERR EXEC without MULTI\r\n"));
+        else
+        {
+            string msg = $"*{q.Count}\r\n";
+            CommandExecutor ce = new CommandExecutor(_clientSocket);
+            while(q.Count > 0)
+            {
+
+                List<object>? tokenizedCommand = q.Dequeue();
+                string response = await ce.ExecCommandAsync(tokenizedCommand);
+                msg += response;
+            }
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes(msg));
+            Server.TransactionQueue.Remove(_clientSocket.Handle, out _);
+        }
+        Server.TransactionMre.Set();    //Unblock the client threads to handle their requests
+    }
+
+    private async Task Multi()
+    {
+        if(!Server.TransactionQueue.ContainsKey(_clientSocket.Handle))
+        {
+            Server.TransactionQueue.TryAdd(_clientSocket.Handle, new Queue<List<object>?>());
+            await _clientSocket.SendAsync(Encoding.UTF8.GetBytes("+OK\r\n"));
+        }
+    }    
+    private async Task Incr(string key)
+    {
+        string response = KeyValueStore.Increment(key);
+        await _clientSocket.SendAsync(Encoding.UTF8.GetBytes(response));
     }
 
     private async Task Wait(string? minReqReplicasAckStr, string? timeoutStr)

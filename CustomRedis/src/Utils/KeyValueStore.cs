@@ -63,4 +63,26 @@ public static class KeyValueStore
         //Returns a list of all keys
         return _expStorage.Keys;
     }
+    
+    public static string Increment(string key)
+    {
+        string response;
+        if (!_expStorage.ContainsKey(key))
+        {
+            Set(key, "1");
+            response = ":1\r\n";
+        }
+        else
+        {
+            if (int.TryParse(_expStorage[key].Item1, out int val))
+            {
+                val++;
+                Set(key, val.ToString());
+                response = $":{val}\r\n";
+            }
+            else
+                response = "-ERR value is not an integer or out of range\r\n";
+        }
+        return response;
+    }
 }

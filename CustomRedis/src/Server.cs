@@ -14,6 +14,11 @@ public class Server
     public static ConcurrentDictionary<IntPtr, Replica> Replicas = new (); //A master server can have 1 or more replicas. This list will be empty if the server is itself a replica
     public static int MasterReplOffset = 0;     //Tracks how many bytes were sent by master to replica
 
+    public static ManualResetEvent TransactionMre = new(true); //This will help to block client requests while a TRANSACTION is executing.
+
+    //For each connection represented by clientSocket, there'll be a transactionQueue
+    public static ConcurrentDictionary<IntPtr, Queue<List<object>?>> TransactionQueue = new();
+
     public static async Task Main(String[] args)
     {
         StoreConfigParams(args);
@@ -120,6 +125,8 @@ public class Server
         while(clientSocket.Connected)
         {
             ReplicaHandler.SyncWithMasterMre.WaitOne();    //Clients of replica must wait until sync with master is complete
+            TransactionMre.WaitOne(); //Other clients must wait until the server is done handling EXEC for a client.
+            
             //Store incoming data into buffer
             byte[] buffer = new byte[1024];
             int bytesRead = await clientSocket.ReceiveAsync(buffer);
